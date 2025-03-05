@@ -1,0 +1,111 @@
+# 1. 加载所需包
+# 如果尚未安装，请先安装所需包，例如使用 BiocManager::install() 安装 rhdf5、SingleCellExperiment、zellkonverter 等。
+library(rhdf5)
+library(Matrix)
+library(SingleCellExperiment)
+library(zellkonverter)
+library(S4Vectors)  # 用于构建 rowData/colData 的 DataFrame
+
+# 2. 定义文件路径并读取 HDF5 中的数据
+h5_file <- "D:/test/GSE174367_snATAC.h5"
+
+# 读取矩阵维度：shape 的内容为 [nFeatures, nCells]
+shape <- h5read(h5_file, "/matrix/shape")
+nFeatures <- shape[1]
+nCells    <- shape[2]
+
+# 读取细胞条形码，长度应为 nCells
+barcodes <- h5read(h5_file, "/matrix/barcodes")
+
+# 读取 features 下各字段（每个字段长度均为 nFeatures，其中 _all_tag_keys 的 dim 为 2）
+all_tag_keys <- h5read(h5_file, "/matrix/features/_all_tag_keys")
+derivation   <- h5read(h5_file, "/matrix/features/derivation")
+feature_type <- h5read(h5_file, "/matrix/features/feature_type")
+genome       <- h5read(h5_file, "/matrix/features/genome")
+id_field     <- h5read(h5_file, "/matrix/features/id")
+name_field   <- h5read(h5_file, "/matrix/features/name")
+
+# 读取构成稀疏矩阵的三个关键数组
+x_data  <- h5read(h5_file, "/matrix/data")    # 非零值
+indices <- h5read(h5_file, "/matrix/indices") # 行索引
+indptr  <- h5read(h5_file, "/matrix/indptr")  # 列指针
+
+# 3. 构建 dgCMatrix 稀疏矩阵
+# 注意：10x 格式通常使用 0-based 索引，因此设置 index1 = FALSE。
+# 使用 sparseMatrix() 可以自动将每列内的行索引排序，避免“i slot is not increasing”错误。
+mat <- sparseMatrix(
+  i      = as.integer(indices),
+  p      = as.integer(indptr),
+  x      = as.numeric(x_data),
+  dims   = c(nFeatures, nCells),
+  index1 = FALSE,  # 若数据为 0-based，则设置为 FALSE
+  repr   = "C"     # 构造列压缩格式（CSC）
+)
+
+# 为矩阵列命名，便于后续查看和对齐细胞信息
+colnames(mat) <- barcodes
+
+# 4. 整理 features 信息，构建 rowData
+# 将 features 下各字段整合为 DataFrame 对象
+features_df <- DataFrame(
+  `_all_tag_keys` = all_tag_keys,
+  derivation      = derivation,
+  feature_type    = feature_type,
+  genome          = genome,
+  id              = id_field,
+  name            = name_field
+)
+# 这里以 feature 的 name 作为行名（确保唯一性）
+rownames(features_df) <- features_df$name
+
+# 5. 读取元数据，并筛选出 AD 组细胞
+ATACmeta <- read.csv("D:/test/ATACmeta.csv")
+# 筛选 Diagnosis 为 "AD" 的细胞（根据你的实际标注值调整，例如 "AD" 或 "Alzheimer"）
+ATAC_AD <- ATACmeta[ATACmeta$Diagnosis == "AD", ]
+
+# 随机抽取 AD 组中的 8000 个细胞
+set.seed(123)
+selected_atacmeta <- ATAC_AD[sample(nrow(ATAC_AD), 8000), ]
+selected_barcodes <- selected_atacmeta$Barcode 
+
+# 6. 根据选中的条形码对矩阵按列子集化
+# 找到在原始矩阵中与 selected_barcodes 对应的列索引
+idx <- match(selected_barcodes, colnames(mat))
+mat_sub <- mat[, idx]
+
+# 7. 构建 SingleCellExperiment 对象，colData 使用筛选后的元数据
+sce <- SingleCellExperiment(
+  assays  = list(counts = mat_sub),
+  rowData = features_df,
+  colData = DataFrame(selected_atacmeta)
+)
+
+# 导出数据，便于后续在 Python 中使用
+library(Matrix)
+writeMM(mat_sub, file = "D:/test/ATAC_AD.mtx")
+write.csv(as.data.frame(selected_atacmeta),
+          file = "D:/test/atacmeta_AD.csv",
+          row.names = FALSE)
+cat("AD组细胞筛选完毕，并随机抽取8000个细胞。\n")
+
+Python
+import scanpy as sc
+import scipy.io
+import pandas as pd
+
+# 1. 读取导出的稀疏矩阵（Matrix Market 格式）
+matrix = scipy.io.mmread("D:/test/ATAC_AD.mtx").tocsr()
+
+# 2. 读取已经筛选好的 AD 组元数据（假设文件中包含 Barcode 以及其他注释信息）
+metadata = pd.read_csv("D:/test/atacmeta_AD.csv")
+
+# 3. 构建 AnnData 对象
+# 注意：X 矩阵的 shape 应为 [n_cells, n_features]，我们假设你已经在 R 中进行了适当的子集化
+adata = sc.AnnData(X=matrix, obs=metadata)
+
+# 4. 不使用 features 数据，设置默认名称
+adata.var_names = [f"feature_{i+1}" for i in range(adata.n_vars)]
+
+# 5. 保存为 h5ad 文件，后续在 Python 中进行分析
+adata.write("D:/test/subset_data_no_features.h5ad")
+print("转换完成，输出文件：D:/test/subset_data_no_features.h5ad")
