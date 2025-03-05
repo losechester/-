@@ -7,6 +7,7 @@ library(zellkonverter)
 library(S4Vectors)  # 用于构建 rowData/colData 的 DataFrame
 
 # 2. 定义文件路径并读取 HDF5 中的数据
+
 h5_file <- "D:/test/GSE174367_snATAC.h5"
 
 # 读取矩阵维度：shape 的内容为 [nFeatures, nCells]
@@ -80,32 +81,67 @@ sce <- SingleCellExperiment(
   colData = DataFrame(selected_atacmeta)
 )
 
-# 导出数据，便于后续在 Python 中使用
-library(Matrix)
-writeMM(mat_sub, file = "D:/test/ATAC_AD.mtx")
-write.csv(as.data.frame(selected_atacmeta),
-          file = "D:/test/atacmeta_AD.csv",
-          row.names = FALSE)
-cat("AD组细胞筛选完毕，并随机抽取8000个细胞。\n")
 
+
+# 筛选！！！！！！！！！！
+# 假设 sce 行代表特征，列代表细胞
+# 计算每个特征在所有细胞中的总计数
+feature_sums <- rowSums(assay(sce, "counts"))
+
+# 按表达量排序
+sorted_indices <- order(feature_sums, decreasing = TRUE)
+
+# 选择前 4000 个特征的索引
+top_4000_indices <- sorted_indices[1:4000]
+
+# 查看筛选前后的特征数
+cat("筛选前特征数：", nrow(sce), "\n")
+cat("筛选后特征数：", 4000, "\n")
+
+sce_filtered <- sce[top_4000_indices, ]
+
+
+# 保存筛选后的数据便于后续在 Python 中使用
+library(Matrix)
+writeMM(assay(sce_filtered, "counts"), file = "D:/test/ATAC_AD.mtx")
+write.csv(as.data.frame(colData(sce_filtered)),
+          file = "D:/test/ATAC_AD_meta.csv",
+          row.names = FALSE)
+write.csv(as.data.frame(rowData(sce_filtered)),
+          file = "D:/test/ATAC_AD_features.csv",
+          row.names = TRUE)
+cat("AD组细胞和筛选后的特征已保存。\n")
+
+#######################################################################################################################################################
 Python
 import scanpy as sc
+import anndata as ad
 import scipy.io
 import pandas as pd
 
-# 1. 读取导出的稀疏矩阵（Matrix Market 格式）
+# 1. 读取矩阵市场文件（counts矩阵）
+# 注意：R中使用writeMM保存的矩阵，其shape为 (n_features, n_cells)
 matrix = scipy.io.mmread("D:/test/ATAC_AD.mtx").tocsr()
 
-# 2. 读取已经筛选好的 AD 组元数据（假设文件中包含 Barcode 以及其他注释信息）
-metadata = pd.read_csv("D:/test/atacmeta_AD.csv")
+# 2. 转置矩阵，使得行表示细胞，列表示特征
+matrix = matrix.transpose()  # 转置后形状应为 (n_cells, n_features)
 
-# 3. 构建 AnnData 对象
-# 注意：X 矩阵的 shape 应为 [n_cells, n_features]，我们假设你已经在 R 中进行了适当的子集化
-adata = sc.AnnData(X=matrix, obs=metadata)
+# 3. 读取细胞元数据（obs）
+meta = pd.read_csv("D:/test/ATAC_AD_meta.csv")
+# 如果meta中有特定的细胞标识列，例如 "barcode"，可以设置为索引：
+# meta = meta.set_index("barcode")
 
-# 4. 不使用 features 数据，设置默认名称
-adata.var_names = [f"feature_{i+1}" for i in range(adata.n_vars)]
+# 4. 读取特征元数据（var）
+# 由于在保存时设置了 row.names=TRUE，所以第一列是特征名称
+features = pd.read_csv("D:/test/ATAC_AD_features.csv", index_col=0)
 
-# 5. 保存为 h5ad 文件，后续在 Python 中进行分析
-adata.write("D:/test/subset_data_no_features.h5ad")
-print("转换完成，输出文件：D:/test/subset_data_no_features.h5ad")
+# 5. 构建 AnnData 对象
+adata = ad.AnnData(X=matrix, obs=meta, var=features)
+
+print("AnnData 对象形状:", adata.shape)
+# 形状应为 (8000, 4000)  —— 其中 8000 为细胞数，4000 为筛选后的特征数
+
+# 6. 保存 AnnData 对象为 .h5ad 文件
+adata.write("D:/test/ATAC_AD.h5ad")
+print("转换完成，输出文件：D:/test/ATAC_AD.h5ad")
+
