@@ -1,0 +1,109 @@
+#R
+# 1. Load Required Packages
+# Install packages if not already installed using BiocManager::install()
+library(rhdf5)              # For reading HDF5 files
+library(Matrix)             # For sparse matrix operations
+library(SingleCellExperiment) # For creating SCE objects
+library(zellkonverter)      # For single-cell data utilities
+library(S4Vectors)          # For DataFrame construction in rowData/colData
+
+# 2. Define File Path and Read HDF5 Data
+h5_file <- "D:/test/GSE174367_snRNA.h5"
+
+# Read matrix dimensions: shape contains [nFeatures, nCells]
+shape <- h5read(h5_file, "/matrix/shape")
+nFeatures <- shape[1]
+nCells    <- shape[2]
+
+# Read cell barcodes (length should match nCells)
+barcodes <- h5read(h5_file, "/matrix/barcodes")
+
+# Read feature fields (each field length should match nFeatures)
+# For snRNA-seq, features are genes, so we expect gene IDs and names
+id_field     <- h5read(h5_file, "/matrix/features/id")     # Gene IDs
+name_field   <- h5read(h5_file, "/matrix/features/name")   # Gene names
+feature_type <- h5read(h5_file, "/matrix/features/feature_type") # Feature type (e.g., "Gene Expression")
+genome       <- h5read(h5_file, "/matrix/features/genome") # Genome reference
+
+# Read sparse matrix components
+x_data  <- h5read(h5_file, "/matrix/data")    # Non-zero values
+indices <- h5read(h5_file, "/matrix/indices") # Row indices
+indptr  <- h5read(h5_file, "/matrix/indptr")  # Column pointers
+
+# 3. Construct dgCMatrix Sparse Matrix
+# 10x data uses 0-based indexing, so set index1 = FALSE
+mat <- sparseMatrix(
+  i      = as.integer(indices),
+  p      = as.integer(indptr),
+  x      = as.numeric(x_data),
+  dims   = c(nFeatures, nCells),
+  index1 = FALSE,  # 0-based indexing
+  repr   = "C"     # Column-compressed sparse format (CSC)
+)
+
+# Assign barcodes as column names for cell identification
+colnames(mat) <- barcodes
+
+# 4. Organize Feature Information into rowData
+# For snRNA-seq, features are genes; create a DataFrame with gene IDs and names
+features_df <- DataFrame(
+  gene_id   = id_field,     # Gene IDs (e.g., ENSG identifiers)
+  gene_name = name_field,   # Gene symbols (e.g., GAPDH)
+  feature_type = feature_type, # Usually "Gene Expression" for snRNA-seq
+  genome       = genome        # Genome reference (e.g., "GRCh38")
+)
+# Use gene_name as row names (assuming uniqueness; adjust if necessary)
+rownames(features_df) <- features_df$gene_name
+
+# 5. Read Metadata and Filter AD Group Cells
+RNAmeta <- read.csv("D:/test/RNAmeta.csv")
+# Filter for AD group; assuming diagnosis column is "Diagnosis" and value is "AD"
+# Check RNAmeta.csv to confirm the exact column name and AD label (e.g., "diagnosis" or "Alzheimer")
+RNA_AD <- RNAmeta[RNAmeta$Diagnosis == "AD", ]
+
+# Randomly select 8000 cells from the AD group
+set.seed(123)  # For reproducibility
+selected_rnameta <- RNA_AD[sample(nrow(RNA_AD), 8000), ]
+selected_barcodes <- selected_rnameta$Barcode
+
+# 6. Subset Matrix by Selected Barcodes
+# Match selected barcodes to matrix columns
+idx <- match(selected_barcodes, colnames(mat))
+mat_sub <- mat[, idx]
+
+# 7. Build SingleCellExperiment Object
+sce <- SingleCellExperiment(
+  assays  = list(counts = mat_sub),    # Count matrix for selected cells
+  rowData = features_df,               # Gene feature information
+  colData = DataFrame(selected_rnameta) # Metadata for selected cells
+)
+
+# 8. Filter to Top 4000 Features (Genes)
+# Calculate total counts per gene across all cells
+gene_sums <- rowSums(assay(sce, "counts"))
+
+# Sort genes by total expression in descending order
+sorted_indices <- order(gene_sums, decreasing = TRUE)
+
+# Select indices of the top 4000 genes
+top_4000_indices <- sorted_indices[1:4000]
+
+# Display feature counts before and after filtering
+cat("筛选前特征数：", nrow(sce), "\n")
+cat("筛选后特征数：", 4000, "\n")
+
+# Subset SCE to the top 4000 genes
+sce_filtered <- sce[top_4000_indices, ]
+
+# 9. Save Filtered Data
+writeMM(assay(sce_filtered, "counts"), file = "D:/test/RNA_AD.mtx")
+write.csv(as.data.frame(colData(sce_filtered)),
+          file = "D:/test/RNA_AD_meta.csv",
+          row.names = FALSE)
+write.csv(as.data.frame(rowData(sce_filtered)),
+          file = "D:/test/RNA_AD_features.csv",
+          row.names = TRUE)
+
+cat("AD组细胞和筛选后的特征已保存。\n")
+
+#Python##############################################################################################################
