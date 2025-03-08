@@ -1,3 +1,4 @@
+############ATAC
 # 1. 加载所需包
 # 如果尚未安装，请先安装所需包，例如使用 BiocManager::install() 安装 rhdf5、SingleCellExperiment、zellkonverter 等。
 library(rhdf5)
@@ -65,8 +66,25 @@ ATACmeta <- read.csv("D:/test/ATACmeta.csv")
 ATAC_AD <- ATACmeta[ATACmeta$Diagnosis == "AD", ]
 
 # 随机抽取 AD 组中的 8000 个细胞
+#set.seed(123)
+#selected_atacmeta <- ATAC_AD[sample(nrow(ATAC_AD), 8000), ]
+
+# 分层抽取AD组的8000个细胞
+
+library(dplyr)
 set.seed(123)
-selected_atacmeta <- ATAC_AD[sample(nrow(ATAC_AD), 8000), ]
+
+# ATAC-seq 数据
+selected_atacmeta <- ATAC_AD %>%
+  group_by(Cell.Type) %>%
+  sample_n(size = round(8000 * n() / nrow(ATAC_AD)), replace = FALSE) %>%
+  ungroup()
+
+print("ATAC before sampling:")
+print(table(ATAC_AD$Cell.Type))
+print("ATAC after sampling:")
+print(table(selected_atacmeta$Cell.Type))
+
 selected_barcodes <- selected_atacmeta$Barcode 
 
 # 6. 根据选中的条形码对矩阵按列子集化
@@ -110,6 +128,7 @@ write.csv(as.data.frame(colData(sce_filtered)),
 write.csv(as.data.frame(rowData(sce_filtered)),
           file = "D:/test/ATAC_AD_features.csv",
           row.names = TRUE)
+
 cat("AD组细胞和筛选后的特征已保存。\n")
 
 #######################################################################################################################################################
